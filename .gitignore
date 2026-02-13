@@ -1,0 +1,7 @@
+drupal
+.claude
+
+# Rust
+/target
+*.swp
+*.swo
