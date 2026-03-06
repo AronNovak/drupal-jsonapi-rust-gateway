@@ -14,11 +14,12 @@ pub async fn resolve_uuids(
     resource_type_map: &ResourceTypeMap,
     entities: &mut [EntityData],
     resource_type: &ResourceType,
+    config_entity_uuids: &HashMap<String, String>,
 ) -> Result<(), AppError> {
     if entities.is_empty() {
         return Ok(());
     }
-    resolve_reference_uuids(pool, resource_type_map, entities, resource_type).await
+    resolve_reference_uuids(pool, resource_type_map, entities, resource_type, config_entity_uuids).await
 }
 
 pub async fn resolve_includes(
@@ -28,6 +29,7 @@ pub async fn resolve_includes(
     resource_type: &ResourceType,
     include_paths: &[String],
     base_url: &str,
+    config_entity_uuids: &HashMap<String, String>,
 ) -> Result<Vec<Value>, AppError> {
     if include_paths.is_empty() || entities.is_empty() {
         return Ok(Vec::new());
@@ -47,6 +49,7 @@ pub async fn resolve_includes(
             base_url,
             &mut included_resources,
             &mut seen,
+            config_entity_uuids,
         )
         .await?;
     }
@@ -59,6 +62,7 @@ async fn resolve_reference_uuids(
     resource_type_map: &ResourceTypeMap,
     entities: &mut [EntityData],
     resource_type: &ResourceType,
+    config_entity_uuids: &HashMap<String, String>,
 ) -> Result<(), AppError> {
     // Collect all target_ids per target entity type
     let mut target_ids_by_type: HashMap<String, Vec<i64>> = HashMap::new();
@@ -106,19 +110,29 @@ async fn resolve_reference_uuids(
         }
     }
 
-    // Batch-load UUIDs (and bundles) for all target entities
-    let mut uuid_maps: HashMap<String, HashMap<i64, (String, String)>> = HashMap::new();
-    for (target_type, ids) in &target_ids_by_type {
+    // Batch-load UUIDs (and bundles) for all target entities concurrently
+    let uuid_futures: Vec<_> = target_ids_by_type.iter().map(|(target_type, ids)| {
         let unique_ids: Vec<i64> = ids.iter().copied().collect::<HashSet<_>>().into_iter().collect();
-        if unique_ids.is_empty() {
-            continue;
+        let target_type = target_type.clone();
+        let pool = pool.clone();
+        async move {
+            if unique_ids.is_empty() {
+                return Ok((target_type, HashMap::new()));
+            }
+            let uuid_map = load_uuids(&pool, resource_type_map, &target_type, &unique_ids).await?;
+            Ok::<_, AppError>((target_type, uuid_map))
         }
-        let uuid_map = load_uuids(pool, resource_type_map, target_type, &unique_ids).await?;
-        uuid_maps.insert(target_type.clone(), uuid_map);
-    }
+    }).collect();
 
-    // Also load config entity UUIDs (node_type, taxonomy_vocabulary)
-    let config_uuids = load_config_entity_uuids(pool, resource_type).await?;
+    let uuid_results = futures::future::join_all(uuid_futures).await;
+
+    let mut uuid_maps: HashMap<String, HashMap<i64, (String, String)>> = HashMap::new();
+    for result in uuid_results {
+        let (target_type, uuid_map) = result?;
+        if !uuid_map.is_empty() {
+            uuid_maps.insert(target_type, uuid_map);
+        }
+    }
 
     // Now update entities with resolved UUIDs
     for entity in entities.iter_mut() {
@@ -129,11 +143,11 @@ async fn resolve_reference_uuids(
             }
             if let Some(target_type) = &bf.target_type {
                 if target_type == "node_type" {
-                    if let Some(uuid) = config_uuids.get(&format!("node_type:{}", entity.bundle)) {
+                    if let Some(uuid) = config_entity_uuids.get(&format!("node_type:{}", entity.bundle)) {
                         entity.base_field_values.insert("node_type_uuid".to_string(), Value::String(uuid.clone()));
                     }
                 } else if target_type == "taxonomy_vocabulary" {
-                    if let Some(uuid) = config_uuids.get(&format!("taxonomy_vocabulary:{}", entity.bundle)) {
+                    if let Some(uuid) = config_entity_uuids.get(&format!("taxonomy_vocabulary:{}", entity.bundle)) {
                         entity.base_field_values.insert("vid_uuid".to_string(), Value::String(uuid.clone()));
                     }
                 } else if let Some(uuid_map) = uuid_maps.get(target_type.as_str()) {
@@ -272,56 +286,6 @@ async fn load_uuids(
     Ok(map)
 }
 
-async fn load_config_entity_uuids(
-    pool: &MySqlPool,
-    resource_type: &ResourceType,
-) -> Result<HashMap<String, String>, AppError> {
-    let mut result = HashMap::new();
-
-    // Load node_type UUIDs
-    if resource_type.entity_type == "node" {
-        let config_name = format!("node.type.{}", resource_type.bundle);
-        let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-            "SELECT data FROM config WHERE name = ?"
-        )
-        .bind(&config_name)
-        .fetch_all(pool)
-        .await?;
-
-        for (data,) in rows {
-            if let Ok(php_val) = crate::php_unserialize::php_unserialize(&data) {
-                if let Some(uuid) = php_val.get_str("uuid") {
-                    result.insert(format!("node_type:{}", resource_type.bundle), uuid.to_string());
-                }
-            }
-        }
-    }
-
-    // Load taxonomy_vocabulary UUIDs
-    if resource_type.entity_type == "taxonomy_term" {
-        let config_name = format!("taxonomy.vocabulary.{}", resource_type.bundle);
-        let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-            "SELECT data FROM config WHERE name = ?"
-        )
-        .bind(&config_name)
-        .fetch_all(pool)
-        .await?;
-
-        for (data,) in rows {
-            if let Ok(php_val) = crate::php_unserialize::php_unserialize(&data) {
-                if let Some(uuid) = php_val.get_str("uuid") {
-                    result.insert(
-                        format!("taxonomy_vocabulary:{}", resource_type.bundle),
-                        uuid.to_string(),
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(result)
-}
-
 fn resolve_include_path<'a>(
     pool: &'a MySqlPool,
     resource_type_map: &'a ResourceTypeMap,
@@ -331,6 +295,7 @@ fn resolve_include_path<'a>(
     base_url: &'a str,
     included: &'a mut Vec<Value>,
     seen: &'a mut HashSet<(String, String)>,
+    config_entity_uuids: &'a HashMap<String, String>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), AppError>> + Send + 'a>> {
     Box::pin(async move {
     if path_parts.is_empty() || entities.is_empty() {
@@ -391,7 +356,7 @@ fn resolve_include_path<'a>(
         field_loader::load_field_data(pool, &target_rt, &mut target_entities).await?;
 
         // Resolve UUIDs for the included entities' relationships too
-        resolve_reference_uuids(pool, resource_type_map, &mut target_entities, &target_rt).await?;
+        resolve_reference_uuids(pool, resource_type_map, &mut target_entities, &target_rt, config_entity_uuids).await?;
 
         for entity in &target_entities {
             let key = (entity.entity_type.clone(), entity.uuid.clone());
@@ -415,6 +380,7 @@ fn resolve_include_path<'a>(
                 base_url,
                 included,
                 seen,
+                config_entity_uuids,
             )
             .await?;
         }

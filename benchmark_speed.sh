@@ -2,19 +2,28 @@
 # Showcase: Rust JSON:API vs Drupal JSON:API response times
 # Randomizes which server is queried first to avoid warm-up bias.
 
-RUST="http://vps-bb463b0a.vps.ovh.net:3000"
-DRUPAL="http://vps-bb463b0a.vps.ovh.net"
+RUST="http://localhost:3000"
+DRUPAL_BASE="http://localhost"
+DRUPAL_DIR="$(cd "$(dirname "$0")/drupal" && pwd)"
 
 BOLD='\033[1m'
 BLUE='\033[0;34m'
 RESET='\033[0m'
 
-measure() {
+measure_rust() {
     local label="$1"
     local url="$2"
     local result
     result=$(curl -sg --max-time 10 -o /dev/null \
         -w "%{time_total}s  |  %{size_download} bytes  |  HTTP %{http_code}" "$url")
+    printf "  %-10s %s\n" "$label" "$result"
+}
+
+measure_drupal() {
+    local label="$1"
+    local url="$2"
+    local result
+    result=$(cd "$DRUPAL_DIR" && ddev exec bash -c "curl -sg --max-time 10 -o /dev/null -w '%{time_total}s  |  %{size_download} bytes  |  HTTP %{http_code}' '$url'" 2>&1)
     printf "  %-10s %s\n" "$label" "$result"
 }
 
@@ -26,11 +35,11 @@ run_test() {
     printf "${BOLD}${BLUE}▶ %s${RESET}\n" "$title"
 
     if (( RANDOM % 2 == 0 )); then
-        measure "Rust  " "${RUST}${path}"
-        measure "Drupal" "${DRUPAL}${path}"
+        measure_rust   "Rust  " "${RUST}${path}"
+        measure_drupal "Drupal" "${DRUPAL_BASE}${path}"
     else
-        measure "Drupal" "${DRUPAL}${path}"
-        measure "Rust  " "${RUST}${path}"
+        measure_drupal "Drupal" "${DRUPAL_BASE}${path}"
+        measure_rust   "Rust  " "${RUST}${path}"
     fi
 }
 

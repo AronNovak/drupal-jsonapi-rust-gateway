@@ -76,6 +76,41 @@ pub async fn discover_schema(pool: &MySqlPool) -> Result<ResourceTypeMap, Box<dy
     })
 }
 
+pub async fn load_all_config_entity_uuids(
+    pool: &MySqlPool,
+) -> Result<HashMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut result = HashMap::new();
+
+    // Node type UUIDs
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT name, data FROM config WHERE name LIKE 'node.type.%'"
+    ).fetch_all(pool).await?;
+    for (name, data) in &rows {
+        if let Ok(php_val) = crate::php_unserialize::php_unserialize(data) {
+            if let Some(uuid) = php_val.get_str("uuid") {
+                let bundle = name.strip_prefix("node.type.").unwrap_or("");
+                result.insert(format!("node_type:{}", bundle), uuid.to_string());
+            }
+        }
+    }
+
+    // Taxonomy vocabulary UUIDs
+    let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        "SELECT name, data FROM config WHERE name LIKE 'taxonomy.vocabulary.%'"
+    ).fetch_all(pool).await?;
+    for (name, data) in &rows {
+        if let Ok(php_val) = crate::php_unserialize::php_unserialize(data) {
+            if let Some(uuid) = php_val.get_str("uuid") {
+                let bundle = name.strip_prefix("taxonomy.vocabulary.").unwrap_or("");
+                result.insert(format!("taxonomy_vocabulary:{}", bundle), uuid.to_string());
+            }
+        }
+    }
+
+    info!("Cached {} config entity UUIDs", result.len());
+    Ok(result)
+}
+
 async fn discover_field_storages(
     pool: &MySqlPool,
 ) -> Result<HashMap<String, FieldStorageDef>, Box<dyn std::error::Error + Send + Sync>> {
