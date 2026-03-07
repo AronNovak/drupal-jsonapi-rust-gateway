@@ -11,7 +11,6 @@ use axum::{
     extract::{Path, RawQuery, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::Value;
 use sqlx::mysql::MySqlPool;
@@ -21,13 +20,15 @@ pub struct AppState {
     pub pool: MySqlPool,
     pub resource_type_map: ResourceTypeMap,
     pub config: AppConfig,
+    pub config_entity_uuids: std::collections::HashMap<String, String>,
 }
 
 fn jsonapi_response(body: Value) -> Response {
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/vnd.api+json")],
-        Json(body),
+        bytes,
     )
         .into_response()
 }
@@ -85,6 +86,7 @@ pub async fn collection_handler(
         &state.resource_type_map,
         &mut entities,
         &resource_type,
+        &state.config_entity_uuids,
     )
     .await?;
 
@@ -95,6 +97,7 @@ pub async fn collection_handler(
         &resource_type,
         &parsed_query.include,
         &state.config.server.base_url,
+        &state.config_entity_uuids,
     )
     .await?;
 
@@ -169,6 +172,7 @@ pub async fn individual_handler(
         &state.resource_type_map,
         &mut entities,
         &resource_type,
+        &state.config_entity_uuids,
     )
     .await?;
 
@@ -179,6 +183,7 @@ pub async fn individual_handler(
         &resource_type,
         &parsed_query.include,
         &state.config.server.base_url,
+        &state.config_entity_uuids,
     )
     .await?;
 

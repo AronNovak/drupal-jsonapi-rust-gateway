@@ -40,11 +40,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Connected to database");
 
     let resource_type_map = schema::discover_schema(&pool).await?;
+    let config_entity_uuids = schema::load_all_config_entity_uuids(&pool).await?;
 
     let state = Arc::new(AppState {
         pool,
         resource_type_map,
         config: config.clone(),
+        config_entity_uuids,
     });
 
     let app = routes::build_router(state)

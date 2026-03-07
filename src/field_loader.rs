@@ -16,30 +16,42 @@ pub async fn load_field_data(
 
     let entity_ids: Vec<i64> = entities.iter().map(|e| e.entity_id).collect();
 
-    for fs in &resource_type.field_storages {
+    // Run all field storage queries concurrently
+    let futures: Vec<_> = resource_type.field_storages.iter().map(|fs| {
         let table_name = format!("{}__{}", resource_type.entity_type, fs.field_name);
-
         let placeholders: Vec<&str> = entity_ids.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT * FROM `{}` WHERE entity_id IN ({}) AND deleted = 0 ORDER BY entity_id, delta",
             table_name,
             placeholders.join(", ")
         );
-
-        let mut db_query = sqlx::query(&sql);
-        for id in &entity_ids {
-            db_query = db_query.bind(id);
-        }
-
-        let rows = match db_query.fetch_all(pool).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::warn!("Failed to load field {} from {}: {}", fs.field_name, table_name, e);
-                continue;
+        let ids = entity_ids.clone();
+        let pool = pool.clone();
+        let field_name = fs.field_name.clone();
+        async move {
+            let mut db_query = sqlx::query(&sql);
+            for id in &ids {
+                db_query = db_query.bind(id);
             }
+            match db_query.fetch_all(&pool).await {
+                Ok(rows) => (field_name, Some(rows)),
+                Err(e) => {
+                    tracing::warn!("Failed to load field {} from {}: {}", field_name, table_name, e);
+                    (field_name, None)
+                }
+            }
+        }
+    }).collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    for (i, (_field_name, rows_opt)) in results.into_iter().enumerate() {
+        let fs = &resource_type.field_storages[i];
+        let rows = match rows_opt {
+            Some(r) => r,
+            None => continue,
         };
 
-        // Group rows by entity_id
         let mut by_entity: IndexMap<i64, Vec<&sqlx::mysql::MySqlRow>> = IndexMap::new();
         for row in &rows {
             let eid: i64 = row
@@ -53,7 +65,6 @@ pub async fn load_field_data(
             let field_value = if let Some(field_rows) = by_entity.get(&entity.entity_id) {
                 build_field_value(fs, field_rows)
             } else if is_reference_field(&fs.field_type) {
-                // No rows for a reference field means null/empty
                 if fs.cardinality == 1 {
                     Value::Null
                 } else {

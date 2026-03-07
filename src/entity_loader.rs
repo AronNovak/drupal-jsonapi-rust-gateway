@@ -20,13 +20,43 @@ fn build_base_select(et_info: &EntityTypeInfo) -> (String, QueryContext) {
     let has_revision_join = et_info.revision_table.is_some() && et_info.entity_type == "node";
     let has_term_revision_join = et_info.revision_table.is_some() && et_info.entity_type == "taxonomy_term";
 
-    let mut sql = "SELECT dt.*, bt.uuid".to_string();
+    // Select only the columns we need instead of dt.*
+    let mut columns: Vec<String> = Vec::new();
+    // id column
+    columns.push(format!("dt.`{}`", et_info.id_column));
+    // revision id column
+    if let Some(rev_col) = &et_info.revision_id_column {
+        columns.push(format!("dt.`{}`", rev_col));
+    }
+    // base field columns (skip ones that come from joined revision tables)
+    let revision_join_cols: &[&str] = if has_revision_join {
+        &["revision_uid", "revision_timestamp", "revision_log"]
+    } else if has_term_revision_join {
+        &["revision_user", "revision_created"]
+    } else {
+        &[]
+    };
+    for bf in &et_info.base_fields {
+        if revision_join_cols.contains(&bf.column.as_str()) {
+            continue;
+        }
+        let col = format!("dt.`{}`", bf.column);
+        if !columns.contains(&col) {
+            columns.push(col);
+        }
+    }
+    columns.push("bt.uuid".to_string());
     if has_revision_join {
-        sql.push_str(", rt.revision_timestamp, rt.revision_uid, rt.revision_log");
+        columns.push("rt.revision_timestamp".to_string());
+        columns.push("rt.revision_uid".to_string());
+        columns.push("rt.revision_log".to_string());
     }
     if has_term_revision_join {
-        sql.push_str(", trt.revision_created, trt.revision_user");
+        columns.push("trt.revision_created".to_string());
+        columns.push("trt.revision_user".to_string());
     }
+
+    let mut sql = format!("SELECT {}", columns.join(", "));
 
     sql.push_str(&format!(" FROM `{}` AS dt", data_table));
     sql.push_str(&format!(
@@ -181,6 +211,8 @@ pub async fn load_entity_collection(
         }
         sql.push_str(" ORDER BY ");
         sql.push_str(&order_parts.join(", "));
+    } else {
+        sql.push_str(&format!(" ORDER BY dt.`{}` ASC", et_info.id_column));
     }
 
     sql.push_str(&format!(" LIMIT {} OFFSET {}", query.page_limit, query.page_offset));
